@@ -3,6 +3,7 @@ import sys
 import os
 import math
 import random
+import threading
 
 # ═══════════════════════════════════════════════════════════════
 #  CENA DE DIÁLOGO — VINNY (The Fool)
@@ -163,9 +164,9 @@ class GerenciadorSprite:
 # ═══════════════════════════════════════════════════════════════
 
 HITBOX_VINNY = pygame.Rect(
-    int(BASE_W * 0.375),   # x  ← ajuste aqui se precisar
-    int(BASE_H * 0.455),   # y
-    int(BASE_W * 0.210),   # largura
+    int(BASE_W * 0.461),   # x  ← ajuste aqui se precisar
+    int(BASE_H * 0.465),   # y
+    int(BASE_W * 0.15),   # largura
     int(BASE_H * 0.255),   # altura
 )
 
@@ -332,17 +333,17 @@ ARVORE = {
     "entrada": {
         "sprite": "sentado_com_taco",
         "falas": [
-            ("???",   "...",                                          6),
-            ("???",   "Oi.",                                          4),
-            ("???",   "...",                                          6),
-            ("???",   "Se você for alucinação...",                    3),
-            ("???",   "Tá bem convincente.",                          3),
+            ("Vinny", "...",                                          6),
+            ("Vinny", "Oi.",                                          4),
+            ("Vinny", "...",                                          6),
+            ("Vinny", "Se você for alucinação...",                    3),
+            ("Vinny", "Tá bem convincente.",                          3),
             ("S/N",   "Quem é você?"),
-            ("???",   "...",                                          6),
-            ("???",   "Boa pergunta.",                                3),
-            ("???",   "Faz um tempo que ninguém me perguntava isso.", 3),
-            ("???",   "...",                                          6),
-            ("???",   "Vinny.",                                       2),   # ← revelação aqui
+            ("Vinny", "...",                                          6),
+            ("Vinny", "Boa pergunta.",                                3),
+            ("Vinny", "Faz um tempo que ninguém me perguntava isso.", 3),
+            ("Vinny", "...",                                          6),
+            ("Vinny", "Vinny.",                                       2),   # ← revelação aqui
             ("Vinny", "Me chamo Vinny."),
         ],
         "proximo": "dialogo_1",
@@ -595,8 +596,8 @@ class CenaVinny:
             self._abrir_menu()
 
     def _checar_revelacao(self, fala):
-        # Revela o nome quando a fala "Vinny." aparece (ainda sob o tag "???")
-        if fala[0] == "???" and fala[1].strip() == "Vinny.":
+        # Revela o nome quando a fala "Vinny." aparece
+        if fala[0] == "Vinny" and fala[1].strip() == "Vinny." and not nome_vinny_revelado:
             revelar_nome_vinny()
 
     # ── Avanço ────────────────────────────────────────────────
@@ -729,6 +730,11 @@ class CenaVinny:
             self._desenhar_hint(surf)
             return
 
+        # ★ Cena cinematográfica sobrepõe tudo
+        if self.cena_item_ativa:
+            cena_item.desenhar(surf)
+            return
+
         if not self.encerrada:
             alpha = self.alpha_saida if self.saindo else 255
             if self.caixa:
@@ -774,29 +780,63 @@ fonte_item_dica= pygame.font.SysFont("Courier New", 16)
 # ── Animação do TACORAME (frames PNG) ────────────────────────
 
 class AnimacaoTacorame:
-    """Carrega e anima os frames PNG do TACORAME com delta time."""
+    """Carrega frames PNG em background thread para não travar o loop principal."""
     TAMANHO_DISPLAY = 260   # px na tela (quadrado)
     FPS_ANIM        = 30
 
     def __init__(self, pasta_frames="tacorame_frames"):
-        self.frames = []
-        self.tempo  = 0.0
-        self._carregar(pasta_frames)
+        self._frames_raw  = []   # bytes carregados pela thread
+        self.frames       = []   # surfaces pygame (convertidas na thread principal)
+        self.tempo        = 0.0
+        self._pronto      = False
+        self._convertido  = False
+        self._lock        = threading.Lock()
+        # Inicia carregamento em background imediatamente
+        t = threading.Thread(target=self._carregar_bg, args=(pasta_frames,), daemon=True)
+        t.start()
 
-    def _carregar(self, pasta):
+    def _carregar_bg(self, pasta):
+        """Roda em thread separada: lê bytes dos PNGs sem tocar no pygame."""
         pasta_abs = os.path.join(PASTA_BASE, pasta)
         if not os.path.isdir(pasta_abs):
             print(f"[Anim] Pasta '{pasta_abs}' não encontrada.")
+            self._pronto = True
             return
         arquivos = sorted(f for f in os.listdir(pasta_abs) if f.endswith(".png"))
+        buf = []
         for arq in arquivos:
             try:
-                img = pygame.image.load(os.path.join(pasta_abs, arq)).convert_alpha()
-                img = pygame.transform.scale(img, (self.TAMANHO_DISPLAY, self.TAMANHO_DISPLAY))
-                self.frames.append(img)
+                with open(os.path.join(pasta_abs, arq), "rb") as f:
+                    buf.append(f.read())
             except Exception as e:
-                print(f"[Anim] Erro ao carregar {arq}: {e}")
-        print(f"[Anim] {len(self.frames)} frames do TACORAME carregados.")
+                print(f"[Anim] Erro ao ler {arq}: {e}")
+        with self._lock:
+            self._frames_raw = buf
+        self._pronto = True
+        print(f"[Anim] {len(buf)} arquivos lidos em background.")
+
+    def converter_na_thread_principal(self):
+        """Chame uma vez por frame até _convertido ser True.
+        Converte em lotes para não travar — pygame.Surface só pode ser
+        criada na thread principal."""
+        if self._convertido or not self._pronto:
+            return
+        with self._lock:
+            raw = self._frames_raw[len(self.frames):]  # lote: restantes
+        LOTE = 10   # converte 10 frames por frame de jogo (< 2 ms cada)
+        for dados in raw[:LOTE]:
+            try:
+                import io
+                surf = pygame.image.load(io.BytesIO(dados)).convert_alpha()
+                surf = pygame.transform.scale(surf, (self.TAMANHO_DISPLAY, self.TAMANHO_DISPLAY))
+                self.frames.append(surf)
+            except Exception as e:
+                print(f"[Anim] Erro ao converter frame: {e}")
+        with self._lock:
+            total = len(self._frames_raw)
+        if len(self.frames) >= total and self._pronto:
+            self._convertido = True
+            print(f"[Anim] {len(self.frames)} frames do TACORAME prontos.")
 
     def atualizar(self, dt):
         if self.frames:
@@ -1085,6 +1125,9 @@ def main():
             cena.processar_evento(evento)
 
         cena.atualizar()
+
+        # Converte frames do TACORAME em lotes, sem travar (background thread já leu os bytes)
+        animacao_tacorame.converter_na_thread_principal()
 
         # Renderiza tudo na surface base (1280×720)
         render_surf.fill((0, 0, 0))
